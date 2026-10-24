@@ -1,0 +1,11 @@
+[general]
+name=Raster Tile Indexer
+description=Build or reuse a CSV index of raster footprints, select intersecting tiles from polygon areas, and load tiles into a Raster Tiles group.
+version=0.1.0
+qgisMinimumVersion=3.28
+author=Community research prototype
+email=
+category=Raster
+hasProcessingProvider=yes
+experimental=True
+about=Native QGIS Processing provider for indexing locally stored raster tiles and selecting tiles by polygon overlap. Source files are referenced, not copied or clipped.
