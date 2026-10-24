@@ -10,6 +10,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from concurrent.futures import ThreadPoolExecutor
 from osgeo import gdal
 
 from qgis.core import (
@@ -82,6 +83,7 @@ def _tile_metadata(path):
         ds = None
 
 
+
 def _build_index(root, index_path, recursive, feedback):
     files = _files(root, recursive)
 
@@ -90,21 +92,45 @@ def _build_index(root, index_path, recursive, feedback):
             'No supported raster tiles found in the directory.'
         )
 
+    workers = 4
+
     feedback.pushInfo(
-        f'Building minimal centroid index from {len(files)} rasters ...'
+        f'Building centroid index from {len(files)} rasters '
+        f'using {workers} parallel workers...'
     )
+
+    def read_metadata(path):
+        try:
+            cx, cy, width, height, wkt = _tile_metadata(path)
+
+            return (
+                path.relative_to(root).as_posix(),
+                cx, cy, width, height, wkt,
+                None
+            )
+
+        except Exception as exc:
+            return (str(path), None, None, None, None, None, str(exc))
 
     rows = []
     reference = None
 
-    for i, path in enumerate(files):
-        if feedback.isCanceled():
-            raise QgsProcessingException(
-                'Cancelled; existing CSV left unchanged.'
-            )
+    with ThreadPoolExecutor(max_workers=workers) as executor:
 
-        try:
-            cx, cy, width, height, wkt = _tile_metadata(path)
+        results = executor.map(read_metadata, files)
+
+        for i, result in enumerate(results):
+
+            if feedback.isCanceled():
+                raise QgsProcessingException('Index creation cancelled.')
+
+            filename, cx, cy, width, height, wkt, error = result
+
+            if error:
+                feedback.pushWarning(
+                    f'Skipping {filename}: {error}'
+                )
+                continue
 
             if reference is None:
                 reference = (width, height, wkt)
@@ -115,31 +141,18 @@ def _build_index(root, index_path, recursive, feedback):
                 or wkt != reference[2]
             ):
                 raise QgsProcessingException(
-                    'Tiles have different extents or CRS. '
-                    'This regular-grid mode requires one tile size and CRS.'
+                    f'Inconsistent tile dimensions or CRS: {filename}'
                 )
 
-            rows.append((
-                path.relative_to(root).as_posix(),
-                cx,
-                cy
-            ))
+            rows.append((filename, cx, cy))
 
-        except QgsProcessingException:
-            raise
-
-        except Exception as exc:
-            feedback.pushWarning(
-                f'Skipping unreadable raster {path}: {exc}'
+            feedback.setProgress(
+                40 * (i + 1) / len(files)
             )
-
-        feedback.setProgress(
-            40 * (i + 1) / len(files)
-        )
 
     if not rows:
         raise QgsProcessingException(
-            'No georeferenced rasters could be indexed.'
+            'No valid raster tiles found.'
         )
 
     fd, temporary = tempfile.mkstemp(
@@ -147,7 +160,6 @@ def _build_index(root, index_path, recursive, feedback):
         prefix='.raster_index_',
         suffix='.csv'
     )
-
     os.close(fd)
 
     try:
@@ -157,6 +169,7 @@ def _build_index(root, index_path, recursive, feedback):
             encoding='utf-8',
             newline=''
         ) as f:
+
             writer = csv.writer(f)
             writer.writerow(HEADER)
             writer.writerows(rows)
@@ -168,9 +181,8 @@ def _build_index(root, index_path, recursive, feedback):
             os.unlink(temporary)
 
     feedback.pushInfo(
-        f'Created {index_path} ({len(rows)} rows, 3 columns).'
+        f'Created {index_path} with {len(rows)} tiles.'
     )
-
 
 class SelectRasterTiles(QgsProcessingAlgorithm):
 
